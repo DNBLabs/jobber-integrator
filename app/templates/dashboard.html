@@ -1,59 +1,67 @@
 {% extends "base.html" %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-<h1>Price Sync</h1>
-<p class="muted">Sync your wholesaler CSV costs to Jobber Products &amp; Services.</p>
+<p class="hero__subtitle">Sync your wholesaler CSV costs to Jobber Products &amp; Services.</p>
 
 {% if error %}
-<div class="card" style="border-left: 4px solid var(--color-critical);">
+<div class="card alert" role="alert">
     <p><strong>Something went wrong:</strong> {{ error }}{% if error_message %} – {{ error_message }}{% endif %}</p>
     <p class="muted">Check that JOBBER_CLIENT_ID and JOBBER_CLIENT_SECRET are set in .env and that your app’s OAuth Callback URL in the Jobber Developer Center matches <code>{{ base_url }}/oauth/callback</code>.</p>
 </div>
 {% endif %}
 
-<div class="card">
+<div class="card {% if connected %}card--highlight{% endif %}">
     {% if connected %}
-    <p><strong>Connected</strong> to Jobber ({{ jobber_account_name or "your account" }}).</p>
-    <p class="muted">Upload a CSV to update product costs.</p>
-    <a href="/disconnect" class="btn btn--subtle" style="margin-top: 0.5rem;">Disconnect</a>
+    <p style="margin: 0 0 var(--space-small);">
+        <span class="badge">Connected</span>
+        <span style="margin-left: var(--space-small);">to Jobber as <strong>{{ jobber_account_name or "your account" }}</strong>.</span>
+    </p>
+    <p class="muted" style="margin: 0 0 var(--space-base);">Upload a CSV to update product costs.</p>
+    <a href="/disconnect" class="btn btn--subtle">Disconnect</a>
 
-    <div class="form-group" style="margin-top: var(--space-large);">
+    <div class="form-group" style="margin-top: var(--space-large); padding-top: var(--space-large); border-top: 1px solid var(--color-border);">
         <form id="sync-form" enctype="multipart/form-data">
-            <label for="csv-file">CSV file</label>
-            <input type="file" id="csv-file" name="file" accept=".csv" required>
-            <div class="form-group" style="margin-top: var(--space-small);">
-                <label style="display: flex; align-items: center; gap: var(--space-small); cursor: pointer;">
-                    <input type="checkbox" id="only-increase-cost" name="only_increase_cost" value="true">
-                    <span>Only update costs when the new price is higher (never lower)</span>
-                </label>
+            <div class="form-group">
+                <label for="csv-file">CSV file</label>
+                <input type="file" id="csv-file" name="file" accept=".csv" required>
             </div>
-            <div class="form-group" style="margin-top: var(--space-small);">
-                <label style="display: flex; align-items: center; gap: var(--space-small); cursor: pointer;">
-                    <input type="checkbox" id="fuzzy-match" name="fuzzy_match" value="true">
-                    <span>Fuzzy matching (match similar product names; use with care and review results)</span>
-                </label>
+            <div class="form-options">
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: var(--space-small); cursor: pointer;">
+                        <input type="checkbox" id="only-increase-cost" name="only_increase_cost" value="true">
+                        <span>Only update costs when the new price is higher (never lower)</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: var(--space-small); cursor: pointer;">
+                        <input type="checkbox" id="fuzzy-match" name="fuzzy_match" value="true">
+                        <span>Fuzzy matching (match similar product names; use with care and review results)</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label for="markup-percent">Markup % (unit price = cost × (1 + markup); 0 = cost only)</label>
+                    <input type="number" id="markup-percent" name="markup_percent" min="0" max="500" step="0.5" value="" placeholder="0">
+                </div>
             </div>
-            <div class="form-group" style="margin-top: var(--space-small);">
-                <label for="markup-percent">Markup % (set unit price = cost × (1 + markup); 0 = cost only)</label>
-                <input type="number" id="markup-percent" name="markup_percent" min="0" max="500" step="0.5" value="" placeholder="0" style="width: 6rem;">
+            <div class="btn-group">
+                <button type="button" class="btn btn--subtle" id="preview-btn">Preview</button>
+                <button type="submit" class="btn" id="sync-btn">Sync now</button>
             </div>
-            <button type="button" class="btn btn--subtle" id="preview-btn" style="margin-top: var(--space-base); margin-right: var(--space-small);">Preview</button>
-            <button type="submit" class="btn" id="sync-btn" style="margin-top: var(--space-base);">Sync now</button>
         </form>
         <p id="sync-status" class="muted" style="margin-top: var(--space-small); display: none;">Syncing…</p>
         <div id="preview-result" class="card sync-result" style="display: none; margin-top: var(--space-base);" role="status"></div>
         <div id="sync-result" class="sync-result" style="display: none;" role="status"></div>
     </div>
     {% else %}
-    <p>Connect your Jobber account to get started.</p>
-    <p class="muted">You’ll be sent to Jobber to authorize this app, then returned here.</p>
+    <p style="margin: 0 0 var(--space-small);">Connect your Jobber account to get started.</p>
+    <p class="muted" style="margin: 0 0 var(--space-base);">You’ll be sent to Jobber to authorize this app, then returned here.</p>
     <a href="/connect" class="btn">Connect to Jobber</a>
     {% endif %}
 </div>
 
 <div class="card">
-    <h2>CSV format</h2>
-    <p class="muted">Your file should have columns: <code>Part_Num</code> (product name in Jobber) and <code>Trade_Cost</code> (unit cost). An optional <code>Description</code> column is shown in the preview to help you confirm which product is which. Supported encodings: UTF-8 and Windows-1252.</p>
+    <h2 class="card__title">CSV format</h2>
+    <p class="muted">Your file should have columns: <code>Part_Num</code> (product name in Jobber) and <code>Trade_Cost</code> (unit cost). An optional <code>Description</code> column is shown in the preview. Supported encodings: UTF-8 and Windows-1252.</p>
 </div>
 
 {% if connected %}
@@ -199,6 +207,4 @@
 })();
 </script>
 {% endif %}
-
-<p class="muted"><a href="{{ base_url }}/health">Health check</a></p>
 {% endblock %}

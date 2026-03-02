@@ -1,14 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Test Sync{% endblock %}
+{% block header_extra %}
+<a href="/dashboard" class="header__back">← Back to dashboard</a>
+{% endblock %}
 {% block content %}
-<h1>Test sync</h1>
-<p class="muted">Runs sync using <code>wholesaler_prices.csv</code> with 25% markup (verifies defaultUnitCost mutation).</p>
+<p class="hero__subtitle">Runs sync using <code>wholesaler_prices.csv</code> with 25% markup (verifies cost and unit price mutation).</p>
 <div class="card">
     <button type="button" class="btn" id="run-test-sync-btn">Run test sync</button>
     <p id="test-sync-status" class="muted" style="margin-top: var(--space-small); display: none;">Syncing…</p>
-    <pre id="test-sync-result" role="status" style="margin-top: var(--space-base); display: none; padding: var(--space-base); background: var(--color-surface--background); border-radius: var(--radius-small); overflow: auto;"></pre>
+    <pre id="test-sync-result" role="status" style="margin-top: var(--space-base); display: none; padding: var(--space-base); background: var(--color-surface--background); border-radius: var(--radius-small); overflow: auto; font-size: var(--typography--fontSize-small);"></pre>
 </div>
-<p class="muted"><a href="/dashboard">Back to dashboard</a></p>
 <script>
 (function() {
     var btn = document.getElementById('run-test-sync-btn');
@@ -37,4 +38,8 @@
     });
 })();
 </script>
+{% endblock %}
+
+{% block footer %}
+<a href="/dashboard">Back to dashboard</a> · <a href="{{ base_url|default('') }}/health">Health check</a>
 {% endblock %}

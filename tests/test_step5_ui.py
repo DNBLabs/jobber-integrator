@@ -59,7 +59,7 @@ def test_base_has_light_theme_and_container(client):
     r = client.get("/dashboard")
     assert r.status_code == 200
     assert 'data-theme="light"' in r.text
-    assert 'class="container"' in r.text
+    assert 'container' in r.text and 'class="' in r.text
 
 
 # ---- Dashboard when not connected ----

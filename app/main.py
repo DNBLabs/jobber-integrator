@@ -286,7 +286,8 @@ async def oauth_callback(request: Request):
         except (TypeError, ValueError):
             pass
 
-    save_connection(
+    await asyncio.to_thread(
+        save_connection,
         jobber_account_id=account_id,
         jobber_account_name=account_name,
         access_token=access_token,
@@ -324,7 +325,7 @@ async def dashboard(request: Request):
     """Manage App URL: show connected state or Connect to Jobber."""
     account_cookie = request.cookies.get(COOKIE_ACCOUNT)
     account_id = get_account_id_from_cookie(account_cookie)
-    connection = get_connection_by_account_id(account_id) if account_id else None
+    connection = await asyncio.to_thread(get_connection_by_account_id, account_id) if account_id else None
 
     connected = connection is not None
     jobber_account_name = connection.get("jobber_account_name") if connection else None
@@ -357,7 +358,7 @@ async def disconnect(request: Request):
             await asyncio.to_thread(call_app_disconnect, token)
         except Exception:
             pass  # e.g. token expired, already disconnected in Jobber; still clear local state
-        delete_connection(account_id)
+        await asyncio.to_thread(delete_connection, account_id)
     log = get_app_logger()
     if account_id:
         log.info(
@@ -424,7 +425,7 @@ async def webhook_jobber(request: Request):
     if dedupe_key in _webhook_dedup_cache and _webhook_dedup_cache[dedupe_key] > now:
         return JSONResponse(status_code=200, content={"ok": True})
     if topic.upper() == "APP_DISCONNECT" and account_id:
-        delete_connection(str(account_id))
+        await asyncio.to_thread(delete_connection, str(account_id))
         get_app_logger().info(
             "Webhook received",
             extra={"event": "webhook", "topic": topic, "account_id": str(account_id), "path": "/webhooks/jobber", "request_id": _request_id(request)},
@@ -673,12 +674,12 @@ async def test_sync_page(request: Request):
     account_cookie = request.cookies.get(COOKIE_ACCOUNT)
     if not get_account_id_from_cookie(account_cookie):
         return RedirectResponse(url="/dashboard", status_code=302)
-    return templates.TemplateResponse("test_sync.html", {"request": request})
+    return templates.TemplateResponse("test_sync.html", {"request": request, "base_url": BASE_URL})
 
 
 @app.get("/health")
 async def health():
     """Phase 2.3: Health check with DB. Returns 200 + db status when healthy, 503 when DB unreachable."""
-    if not check_db():
+    if not await asyncio.to_thread(check_db):
         return JSONResponse(status_code=503, content={"status": "unhealthy", "db": "error"})
     return {"status": "ok", "db": "ok"}
