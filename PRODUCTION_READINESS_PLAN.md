@@ -2,6 +2,8 @@
 
 This document outlines a clear path to make the Price Sync app robust and production-ready (excluding deployment and hosting). No code—implementation detail and order of operations only.
 
+**Prerequisite:** Complete the **[parser refactor](PARSER_IMPROVEMENT_PLAN.md)** before starting the phases below. The parser plan (encoding, skipped-row visibility, column aliases, cost formats, row limit, parse errors) is implemented first; then Phase 1 adds config and file-size limit, Phase 2 adds logging (using parser result), and Phase 3 maps parser errors to user messages.
+
 ---
 
 ## Principles
@@ -31,7 +33,7 @@ This document outlines a clear path to make the Price Sync app robust and produc
 - **Current state:** CSV upload uses `await file.read()` with no size limit. Parse has no row cap. Very large files can exhaust memory or cause long-running syncs and timeouts.
 - **Implementation path:**
   - **Max upload size:** Define a limit (e.g. 5–10 MB). Read the file in chunks or use framework support (e.g. FastAPI/Starlette body size limit) so that oversized uploads are rejected before full read. Return 413 or 400 with a clear message (“CSV must be under X MB”).
-  - **Max rows:** After parsing, if the number of rows exceeds a limit (e.g. 500 or 1000), reject the request with a clear message (“CSV has N rows; maximum is M”). Consider making the limit configurable via env (e.g. `CSV_MAX_ROWS`) with a safe default. Apply the same limit to both sync and preview.
+  - **Max rows:** The parser refactor (done first) already enforces a row limit and returns a structured result; the route or parser uses a configurable limit (e.g. env `CSV_MAX_ROWS`). When over limit, reject with a clear message (“CSV has N rows; maximum is M”). Apply the same limit to both sync and preview. See [PARSER_IMPROVEMENT_PLAN.md](PARSER_IMPROVEMENT_PLAN.md) sections 7 and 8.
   - **Docs:** In CSV format / README, state the max file size and max rows so users know what to expect.
 - **Success:** Oversized or over-long CSVs are rejected with a clear error; no unbounded memory or runtimes.
 
@@ -88,7 +90,7 @@ This document outlines a clear path to make the Price Sync app robust and produc
 
 - **Current state:** Errors are handled in each route or in sync; messages are ad hoc. Some failures may surface stack traces or raw exceptions to the client.
 - **Implementation path:**
-  - **Boundary:** Define a small set of “user-facing” error types or messages (e.g. “Not connected”, “Session expired”, “Jobber is temporarily unavailable”, “Invalid CSV”, “File too large”). In routes and sync, catch known cases and map them to these messages and appropriate HTTP status codes (403, 400, 502, etc.).
+  - **Boundary:** Define a small set of “user-facing” error types or messages (e.g. “Not connected”, “Session expired”, “Jobber is temporarily unavailable”, “Invalid CSV”, “File too large”). In routes and sync, catch known cases and map them to these messages and appropriate HTTP status codes (403, 400, 502, etc.). **CSV/parse errors:** The parser (refactored first) raises specific errors; map those (missing columns, no valid rows, encoding, too many rows) to “Invalid CSV” or “File too large” per [PARSER_IMPROVEMENT_PLAN.md](PARSER_IMPROVEMENT_PLAN.md) (section 8).
   - **Unknown errors:** For unhandled or unexpected exceptions, log the full error (and request id) at ERROR, then return a generic message (“Something went wrong; please try again”) and 500. Never send stack traces or internal details to the client in production.
   - **Consistency:** Prefer a single helper or middleware that turns “known error” vs “unknown exception” into a consistent JSON or HTML response so the dashboard and API behave the same.
 - **Success:** Users never see stack traces; they see clear, safe messages; ops see full details in logs.
@@ -142,9 +144,10 @@ This document outlines a clear path to make the Price Sync app robust and produc
 
 ## Implementation order (concise path)
 
-1. **Phase 1 (safety rails):** Config validation and SECRET_KEY warning → file and row limits → cookie `secure`. Each step is independent; do in this order so config is correct before you rely on it in production.
-2. **Phase 2 (observability):** Logging (events + errors) → optional request id → deep health. Logging first so health and later changes can be observed.
-3. **Phase 3 (errors):** Centralized error mapping and “never leak internals” → quick review of timeouts/retries. Keeps Phase 2 logs useful and user experience consistent.
+0. **Parser refactor (do first):** Complete [PARSER_IMPROVEMENT_PLAN.md](PARSER_IMPROVEMENT_PLAN.md). The parser then returns a structured result (rows + skipped counts), supports encoding fallback and row limit, and raises clear parse errors. Phases 1–5 below assume this is done.
+1. **Phase 1 (safety rails):** Config validation and SECRET_KEY warning → file size limit in route (row limit already in parser) → cookie `secure`. Each step is independent; do in this order so config is correct before you rely on it in production.
+2. **Phase 2 (observability):** Logging (events + errors) → optional request id → deep health. When adding sync/preview logging, include parse outcome (rows accepted, skipped counts) from the parser’s structured result.
+3. **Phase 3 (errors):** Centralized error mapping and “never leak internals” → quick review of timeouts/retries. Map parser errors to user messages per parser plan section 8.
 4. **Phase 4 (deps):** Pin and audit; document update process. Can run in parallel with Phase 3.
 5. **Phase 5 (optional):** Rate limiting and webhook idempotency only if your environment or Jobber’s policies require them.
 
@@ -158,3 +161,19 @@ This document outlines a clear path to make the Price Sync app robust and produc
 - **Optional:** Rate limiting and idempotency only where your threat model or SLAs need them.
 
 After Phases 1–4 you have a clear, maintainable path to production; Phase 5 is there when you need it.
+
+---
+
+## Parser and CSV handling (prerequisite)
+
+**Complete the parser refactor before starting Phase 1.** The refactor is described in **[PARSER_IMPROVEMENT_PLAN.md](PARSER_IMPROVEMENT_PLAN.md)** and covers:
+
+- **Visibility:** Skipped-row counts and reasons in sync/preview responses (no silent skips).
+- **Robustness:** Encoding fallback (e.g. Windows-1252), optional column aliases, and safer cost parsing.
+- **Limits and errors:** Row limit and clear user-facing parse-error messages.
+
+Once the parser refactor is done:
+
+- **Phase 1.2:** Add file size limit in the route; row limit is already enforced by the parser (or by the route using the parser result).
+- **Phase 2.1:** Logging uses the parser’s structured result (rows accepted, skipped by reason).
+- **Phase 3.1:** Routes map the parser’s specific errors to the same user-facing messages and 400 responses.

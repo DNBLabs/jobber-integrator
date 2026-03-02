@@ -13,6 +13,7 @@ import datetime
 import hmac
 import hashlib
 import json
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -41,6 +42,14 @@ from app.jobber_oauth import (
 from app.sync import parse_csv_from_bytes, run_sync, run_sync_preview
 
 templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
+
+
+# Max CSV upload size in bytes (default 10 MB). Can be overridden via env CSV_MAX_UPLOAD_BYTES.
+_MAX_CSV_UPLOAD_BYTES_DEFAULT = 10 * 1024 * 1024
+try:
+    MAX_CSV_UPLOAD_BYTES = int(os.getenv("CSV_MAX_UPLOAD_BYTES", str(_MAX_CSV_UPLOAD_BYTES_DEFAULT)))
+except ValueError:
+    MAX_CSV_UPLOAD_BYTES = _MAX_CSV_UPLOAD_BYTES_DEFAULT
 
 
 @asynccontextmanager
@@ -271,6 +280,27 @@ def _parse_fuzzy_form(fuzzy_match: str | None, fuzzy_threshold: str | None) -> t
     return (on, max(0.0, min(1.0, t)))
 
 
+class FileTooLargeError(Exception):
+    """Raised when an uploaded CSV exceeds MAX_CSV_UPLOAD_BYTES."""
+
+
+async def _read_upload_file_with_limit(file: UploadFile, max_bytes: int) -> bytes:
+    """Read uploaded file in chunks and enforce a maximum size."""
+    total = 0
+    chunks: list[bytes] = []
+    chunk_size = 1024 * 1024  # 1 MB
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            mb = max_bytes // (1024 * 1024)
+            raise FileTooLargeError(f"CSV must be under {mb} MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/api/sync/preview")
 async def api_sync_preview(
     request: Request,
@@ -292,15 +322,21 @@ async def api_sync_preview(
             content={"error": "Please upload a CSV file."},
         )
     try:
-        content = await file.read()
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        content = await _read_upload_file_with_limit(file, MAX_CSV_UPLOAD_BYTES)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Unable to read uploaded file."})
     try:
-        rows = parse_csv_from_bytes(content)
+        parse_result = parse_csv_from_bytes(content)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     fuzzy_on, fuzzy_t = _parse_fuzzy_form(fuzzy_match, fuzzy_threshold)
+    rows = parse_result.rows
     result = await asyncio.to_thread(run_sync_preview, account_id, rows, fuzzy_on, fuzzy_t)
+    # Include parse summary for visibility (no silent skips)
+    result["parse_skipped_total"] = parse_result.skipped_total
+    result["parse_skipped_reasons"] = parse_result.skipped_reasons
     if result.get("error") and not result.get("skus_not_found") and result.get("increases", 0) == 0 and result.get("decreases", 0) == 0 and result.get("unchanged", 0) == 0:
         return JSONResponse(status_code=403, content=result)
     return result
@@ -339,17 +375,22 @@ async def api_sync(
             content={"error": "Please upload a CSV file."},
         )
     try:
-        content = await file.read()
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        content = await _read_upload_file_with_limit(file, MAX_CSV_UPLOAD_BYTES)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"error": str(e)})
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Unable to read uploaded file."})
     try:
-        rows = parse_csv_from_bytes(content)
+        parse_result = parse_csv_from_bytes(content)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     only_increase = only_increase_cost and str(only_increase_cost).strip().lower() in ("true", "1", "yes")
     fuzzy_on, fuzzy_t = _parse_fuzzy_form(fuzzy_match, fuzzy_threshold)
+    rows = parse_result.rows
     markup = _parse_markup_percent(markup_percent)
     result = await asyncio.to_thread(run_sync, account_id, rows, only_increase, fuzzy_on, fuzzy_t, markup)
+    result["parse_skipped_total"] = parse_result.skipped_total
+    result["parse_skipped_reasons"] = parse_result.skipped_reasons
     if result.get("error") and result["updated"] == 0 and not result.get("skus_not_found"):
         return JSONResponse(status_code=403, content=result)
     return result
@@ -373,9 +414,10 @@ async def api_sync_test_run(request: Request):
     if not csv_path.is_file():
         return JSONResponse(status_code=400, content={"error": f"CSV not found: {csv_path}"})
     try:
-        rows = parse_csv_from_bytes(csv_path.read_bytes())
+        parse_result = parse_csv_from_bytes(csv_path.read_bytes())
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+    rows = parse_result.rows
     result = await asyncio.to_thread(
         run_sync, account_id, rows, only_increase_cost=False, fuzzy_match=False, markup_percent=25.0
     )

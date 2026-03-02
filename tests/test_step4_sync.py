@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.database import init_db
 from app.sync import (
+    _decode_csv_content,
     parse_csv_from_bytes,
     run_sync,
     run_sync_preview,
@@ -37,15 +38,44 @@ def client():
 def test_parse_csv_from_bytes_valid():
     """Step 4: parse CSV with Part_Num and Trade_Cost."""
     csv = b"Part_Num,Trade_Cost\nSKU1,10.50\nSKU2,20"
-    rows = parse_csv_from_bytes(csv)
-    assert rows == [("SKU1", 10.5, ""), ("SKU2", 20.0, "")]
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("SKU1", 10.5, ""), ("SKU2", 20.0, "")]
+    assert result.skipped_total == 0
+    assert result.skipped_reasons == {}
 
 
 def test_parse_csv_from_bytes_utf8_bom():
     """Step 4: parse CSV with UTF-8 BOM."""
     csv = "\ufeffPart_Num,Trade_Cost\nA,1.0".encode("utf-8")
-    rows = parse_csv_from_bytes(csv)
-    assert rows == [("A", 1.0, "")]
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("A", 1.0, "")]
+    assert result.skipped_total == 0
+
+
+def test_decode_csv_content_utf8():
+    """Parser step 2: UTF-8 decodes successfully."""
+    text = _decode_csv_content(b"Part_Num,Trade_Cost\nA,1")
+    assert "Part_Num" in text and "A" in text
+
+
+def test_decode_csv_content_cp1252_fallback():
+    """Parser step 2: Invalid UTF-8 but valid Windows-1252 decodes via cp1252."""
+    # 0xC0 0x80 is invalid UTF-8 (overlong); in cp1252 it's À + Euro
+    content = b"Part_Num,Trade_Cost\n\xc0\x80,2.50"
+    text = _decode_csv_content(content)
+    assert "Part_Num" in text
+    # Decoded part number is two chars in cp1252
+    result = parse_csv_from_bytes(content)
+    assert len(result.rows) == 1
+    assert result.rows[0][1] == 2.5
+
+
+def test_parse_csv_from_bytes_cp1252_fallback():
+    """Parser step 2: CSV in Windows-1252 (invalid UTF-8) parses via encoding fallback."""
+    # £ in Windows-1252 is single byte 0xA3; use a CSV that's valid cp1252
+    content = "Part_Num,Trade_Cost\nSKU\xa3,10.00".encode("cp1252")
+    result = parse_csv_from_bytes(content)
+    assert result.rows == [("SKU£", 10.0, "")]
 
 
 def test_parse_csv_from_bytes_missing_columns_raises():

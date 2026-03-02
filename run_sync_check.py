@@ -33,13 +33,16 @@ def main():
 
     content = csv_path.read_bytes()
     try:
-        rows = parse_csv_from_bytes(content)
+        parse_result = parse_csv_from_bytes(content)
     except ValueError as e:
         print(f"CSV error: {e}")
         return 1
 
+    rows = parse_result.rows
     print(f"Account: {account_id}")
     print(f"Rows: {len(rows)}")
+    if parse_result.skipped_total:
+        print(f"Skipped rows: {parse_result.skipped_total} (reasons: {parse_result.skipped_reasons})")
     print("Running sync with markup 25%...")
     result = run_sync(
         account_id,

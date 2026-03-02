@@ -8,7 +8,8 @@ import io
 import json
 import re
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 import requests
 
@@ -104,16 +105,50 @@ class TokenExpiredError(Exception):
     """Raised when Jobber returns 401; caller should refresh and retry."""
 
 
-def parse_csv_from_bytes(content: bytes) -> list[tuple[str, float, str]]:
+def _decode_csv_content(content: bytes) -> str:
     """
-    Parse CSV from bytes per RFC 4180. Columns Part_Num and Trade_Cost required; optional Description.
-    Returns list of (part_num, cost, description). description is "" when no Description column.
+    Decode CSV bytes to text. Tries utf-8-sig, then cp1252 (Windows-1252).
+    Raises ValueError with a clear message if both fail.
+    """
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(
+        "CSV encoding could not be detected (tried UTF-8, Windows-1252). "
+        "Please save the file as UTF-8."
+    )
+
+
+@dataclass
+class ParseResult:
+    """Result of parsing a CSV upload."""
+
+    rows: List[Tuple[str, float, str]]
+    skipped_total: int
+    skipped_reasons: Dict[str, int]
+
+
+def parse_csv_from_bytes(content: bytes) -> ParseResult:
+    """
+    Parse CSV from bytes per RFC 4180.
+
+    Columns Part_Num and Trade_Cost required; optional Description.
+    Returns ParseResult with rows = list of (part_num, cost, description). description is ""
+    when no Description column. skipped_total / skipped_reasons report how many data rows were
+    ignored and why.
+
     Raises ValueError if columns missing or no valid rows.
     """
     required = {"Part_Num", "Trade_Cost"}
-    rows: list[tuple[str, float, str]] = []
-    with io.BytesIO(content) as buf:
-        text = buf.read().decode("utf-8-sig")
+    rows: List[Tuple[str, float, str]] = []
+    skipped_reasons: Dict[str, int] = {}
+
+    def _inc(reason: str) -> None:
+        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+
+    text = _decode_csv_content(content)
     text = re.sub(r",\s*\"", ",\"", text)
     full_reader = csv.reader(io.StringIO(text))
     all_rows = list(full_reader)
@@ -133,23 +168,28 @@ def parse_csv_from_bytes(content: bytes) -> list[tuple[str, float, str]]:
     desc_idx = fieldnames.index("Description") if "Description" in fieldnames else None
     for row in all_rows[header_idx + 1 :]:
         if len(row) <= max(part_num_idx, trade_cost_idx):
+            _inc("row_too_short")
             continue
         part_num = (row[part_num_idx] or "").strip()
         trade_cost_raw = (row[trade_cost_idx] or "").strip()
         description = (row[desc_idx] or "").strip() if desc_idx is not None and len(row) > desc_idx else ""
         if not part_num and not trade_cost_raw:
+            _inc("empty_part_and_cost")
             continue
         if not part_num:
+            _inc("empty_part_num")
             continue
         trade_cost_clean = trade_cost_raw.replace("£", "").replace(",", "").strip()
         try:
             cost = float(trade_cost_clean)
         except ValueError:
+            _inc("invalid_cost")
             continue
         rows.append((part_num, cost, description))
     if not rows:
         raise ValueError("No valid rows to process")
-    return rows
+    skipped_total = sum(skipped_reasons.values())
+    return ParseResult(rows=rows, skipped_total=skipped_total, skipped_reasons=skipped_reasons)
 
 
 def _build_headers(token: str) -> dict[str, str]:
