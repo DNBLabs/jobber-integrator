@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.database import init_db
 from app.sync import (
+    ParseError,
     _decode_csv_content,
     parse_csv_from_bytes,
     run_sync,
@@ -70,6 +71,15 @@ def test_decode_csv_content_cp1252_fallback():
     assert result.rows[0][1] == 2.5
 
 
+def test_parse_error_unsupported_encoding():
+    """Step 7: When decode fails for all encodings, ParseError(unsupported_encoding) is raised."""
+    with patch("app.sync._decode_csv_content", side_effect=ParseError("unsupported_encoding", "CSV encoding could not be detected. Please save the file as UTF-8.")):
+        with pytest.raises(ParseError) as exc_info:
+            parse_csv_from_bytes(b"Part_Num,Trade_Cost\nA,1")
+        assert exc_info.value.code == "unsupported_encoding"
+        assert "UTF-8" in exc_info.value.message
+
+
 def test_parse_csv_from_bytes_cp1252_fallback():
     """Parser step 2: CSV in Windows-1252 (invalid UTF-8) parses via encoding fallback."""
     # £ in Windows-1252 is single byte 0xA3; use a CSV that's valid cp1252
@@ -78,18 +88,124 @@ def test_parse_csv_from_bytes_cp1252_fallback():
     assert result.rows == [("SKU£", 10.0, "")]
 
 
+def test_parse_csv_from_bytes_quoted_fields_with_commas():
+    """Parser step 3: RFC 4180 quoted fields containing commas parse correctly (no global regex)."""
+    csv_content = b'Part_Num,Trade_Cost,Description\n"SKU, with comma",10.50,"Desc, also comma"\nNormal,20.0,Plain'
+    result = parse_csv_from_bytes(csv_content)
+    assert result.rows == [
+        ("SKU, with comma", 10.5, "Desc, also comma"),
+        ("Normal", 20.0, "Plain"),
+    ]
+    assert result.skipped_total == 0
+
+
 def test_parse_csv_from_bytes_missing_columns_raises():
-    """Step 4: missing required columns raises ValueError."""
+    """Step 4: missing required columns raises ParseError with helpful message."""
     csv = b"Name,Price\nx,1"
-    with pytest.raises(ValueError, match="Part_Num and Trade_Cost"):
+    with pytest.raises(ParseError, match="part number.*cost") as exc_info:
         parse_csv_from_bytes(csv)
+    assert exc_info.value.code == "missing_columns"
 
 
 def test_parse_csv_from_bytes_no_valid_rows_raises():
-    """Step 4: no valid rows raises ValueError."""
+    """Step 4: no valid rows raises ParseError."""
     csv = b"Part_Num,Trade_Cost\n,"
-    with pytest.raises(ValueError, match="No valid rows"):
+    with pytest.raises(ParseError, match="No valid rows") as exc_info:
         parse_csv_from_bytes(csv)
+    assert exc_info.value.code == "no_valid_rows"
+
+
+def test_parse_csv_from_bytes_header_aliases_part_number_trade_cost():
+    """Step 4: 'Part Number' and 'Trade Cost' column names work (aliases)."""
+    csv = b"Part Number,Trade Cost\nP1,1.5\nP2,2.0"
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("P1", 1.5, ""), ("P2", 2.0, "")]
+    assert result.skipped_total == 0
+
+
+def test_parse_csv_from_bytes_header_case_insensitive():
+    """Step 4: header matching is case-insensitive (e.g. PART_NUM, trade_cost)."""
+    csv = b"PART_NUM,TRADE_COST\nX,10\nY,20"
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("X", 10.0, ""), ("Y", 20.0, "")]
+
+
+def test_parse_csv_from_bytes_description_alias_desc():
+    """Step 4: 'Desc' column is accepted as description alias."""
+    csv = b"Part_Num,Trade_Cost,Desc\nA,1,Brief\nB,2,Other"
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("A", 1.0, "Brief"), ("B", 2.0, "Other")]
+
+
+def test_parse_csv_from_bytes_cost_currency_symbols():
+    """Step 5: £ $ € are stripped and cost parsed."""
+    csv = b"Part_Num,Trade_Cost\nP1,10.50\nP2,$5.99\nP3,100\nP4,50"
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("P1", 10.5, ""), ("P2", 5.99, ""), ("P3", 100.0, ""), ("P4", 50.0, "")]
+    csv_pound_euro = "Part_Num,Trade_Cost\nA,£10.50\nB,€20".encode("utf-8")
+    r2 = parse_csv_from_bytes(csv_pound_euro)
+    assert r2.rows == [("A", 10.5, ""), ("B", 20.0, "")]
+
+
+def test_parse_csv_from_bytes_cost_us_format():
+    """Step 5: US format 1,234.56 (comma thousands, period decimal)."""
+    csv = b'Part_Num,Trade_Cost\nA,"1,234.56"\nB,"2,000.00"'
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("A", 1234.56, ""), ("B", 2000.0, "")]
+
+
+def test_parse_csv_from_bytes_cost_eu_format():
+    """Step 5: EU format 1.234,56 (period thousands, comma decimal)."""
+    csv = b'Part_Num,Trade_Cost\nX,"1.234,56"\nY,"2.000,00"'
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("X", 1234.56, ""), ("Y", 2000.0, "")]
+
+
+def test_parse_csv_from_bytes_cost_eu_space_thousands():
+    """Step 5: EU style with space as thousands separator."""
+    csv = b'Part_Num,Trade_Cost\nA,"1 234,56"'
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("A", 1234.56, "")]
+
+
+def test_parse_csv_from_bytes_cost_invalid_counted():
+    """Step 5: Non-numeric cost is skipped and counted as invalid_cost."""
+    csv = b"Part_Num,Trade_Cost\nOK,10\nBad,not-a-number\nOK2,5"
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("OK", 10.0, ""), ("OK2", 5.0, "")]
+    assert result.skipped_reasons.get("invalid_cost", 0) == 1
+
+
+def test_parse_csv_from_bytes_cost_negative_rejected():
+    """Step 5: Negative cost is rejected and counted as invalid_cost."""
+    csv = b"Part_Num,Trade_Cost\nA,10\nB,-5\nC,20"
+    result = parse_csv_from_bytes(csv)
+    assert result.rows == [("A", 10.0, ""), ("C", 20.0, "")]
+    assert result.skipped_reasons.get("invalid_cost", 0) == 1
+
+
+def test_parse_csv_from_bytes_row_limit_at_limit_ok():
+    """Step 6: Exactly max_rows valid rows succeeds."""
+    csv = b"Part_Num,Trade_Cost\nA,1\nB,2"
+    result = parse_csv_from_bytes(csv, max_rows=2)
+    assert len(result.rows) == 2
+    assert result.rows == [("A", 1.0, ""), ("B", 2.0, "")]
+
+
+def test_parse_csv_from_bytes_row_limit_over_raises():
+    """Step 6: More than max_rows valid rows raises ParseError with clear message."""
+    csv = b"Part_Num,Trade_Cost\nA,1\nB,2\nC,3\nD,4"
+    with pytest.raises(ParseError, match="too many rows.*maximum is 3") as exc_info:
+        parse_csv_from_bytes(csv, max_rows=3)
+    assert exc_info.value.code == "too_many_rows"
+
+
+def test_parse_csv_from_bytes_row_limit_none_no_limit():
+    """Step 6: max_rows=None allows any number of rows."""
+    rows = ["Part_Num,Trade_Cost"] + [f"P{i},{i}" for i in range(100)]
+    csv = "\n".join(rows).encode("utf-8")
+    result = parse_csv_from_bytes(csv, max_rows=None)
+    assert len(result.rows) == 100
 
 
 def test_api_sync_requires_auth(client):

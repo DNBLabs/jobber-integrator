@@ -164,20 +164,20 @@ Implement in this order so that each step is testable and the next builds on it:
 2. **Encoding fallback (section 1)** — **DONE**  
    `_decode_csv_content()` in `app/sync.py` tries `utf-8-sig` then `cp1252`; raises `ValueError` with a clear message if both fail. Parser uses it before CSV parse. Tests: UTF-8, UTF-8 BOM, Windows-1252 fallback (`test_decode_csv_content_utf8`, `test_decode_csv_content_cp1252_fallback`, `test_parse_csv_from_bytes_cp1252_fallback`).
 
-3. **Remove global regex (section 2)**  
-   Remove `re.sub`; add test for quoted fields with commas.
+3. **Remove global regex (section 2)** — **DONE**  
+   Removed `re.sub(r",\s*\"", ",\"", text)` from `parse_csv_from_bytes`; parsing relies on `csv.reader` only. Added `test_parse_csv_from_bytes_quoted_fields_with_commas` for RFC 4180 quoted fields containing commas.
 
-4. **Header aliases and case-insensitive match (section 3 + 6)**  
-   Canonical column names and alias table; optional Description aliases. Tests: exact names, “Part Number”/“Trade Cost”, “Desc”, wrong case.
+4. **Header aliases and case-insensitive match (section 3 + 6)** — **DONE**  
+   _normalize_header_cell() and alias sets in app/sync.py; header row is first row with both part-number and cost columns (by normalized alias). Missing-column error message updated. Tests: exact names, “Part Number”/“Trade Cost”, “Desc”, wrong case.
 
-5. **Cost parsing (section 5)**  
-   Currency symbols and decimal/thousands heuristic; count invalid/negative under skipped reasons. Tests: £, $, EU format, invalid, negative (if rejected).
+5. **Cost parsing (section 5)** — **DONE**  
+   `_parse_cost()` in app/sync.py: strips £ $ € and trailing USD/GBP/EUR, removes space thousands; decimal heuristic (both comma and period → last is decimal; only one → that is decimal). Returns None for invalid or negative; parser counts under invalid_cost. Tests: currency symbols, US (1,234.56), EU (1.234,56 and 1 234,56), invalid, negative.
 
-6. **Row limit (section 7)**  
-   Integrate with Phase 1.2: parser or route enforces `max_rows`; clear error when over. Document in README.
+6. **Row limit (section 7)** — **DONE**  
+   `parse_csv_from_bytes(content, max_rows=None)` accepts optional `max_rows`; when set and `len(rows) > max_rows` raises ValueError with message "CSV has more than M rows (N rows found); maximum is M." App reads `CSV_MAX_ROWS` (default 1000) and passes to parser for sync, preview, and test-run; `run_sync_check.py` uses same env. Documented in README.
 
-7. **Parse error types and API (section 8)**  
-   Introduce `ParseError` (or equivalent) and map in routes to 400 and user messages. Align with Phase 3.1 when that is done.
+7. **Parse error types and API (section 8)** — **DONE**  
+   `ParseError(code, message)` in app/sync.py with codes: missing_columns, no_valid_rows, unsupported_encoding, too_many_rows. Parser and _decode_csv_content raise ParseError with user-facing messages (no raw encoding names or stack traces). Routes in main.py catch ParseError and return 400 with `e.message`; run_sync_check.py prints `e.message`. Tests assert codes and messages; test_parse_error_unsupported_encoding added.
 
 File size limit (section 7) is implemented in the **route** as part of Phase 1.2, not inside the parser.
 

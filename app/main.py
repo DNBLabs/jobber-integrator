@@ -13,15 +13,23 @@ import datetime
 import hmac
 import hashlib
 import json
+import logging
 import os
+import sys
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
-from app.config import BASE_URL, JOBBER_CLIENT_ID, PROJECT_ROOT
+from app.config import BASE_URL, JOBBER_CLIENT_ID, JOBBER_CLIENT_SECRET, PROJECT_ROOT, SECRET_KEY
+from app.logging_config import configure_logging, get_app_logger
 from app.cookies import (
     COOKIE_ACCOUNT,
     COOKIE_OAUTH_STATE,
@@ -30,8 +38,7 @@ from app.cookies import (
     get_account_id_from_cookie,
     generate_state,
 )
-from app.database import init_db, get_connection_by_account_id, save_connection, delete_connection
-from app.config import JOBBER_CLIENT_SECRET
+from app.database import init_db, check_db, get_connection_by_account_id, save_connection, delete_connection
 from app.jobber_oauth import (
     build_authorize_url,
     call_app_disconnect,
@@ -39,9 +46,22 @@ from app.jobber_oauth import (
     get_account_info,
     get_valid_access_token,
 )
-from app.sync import parse_csv_from_bytes, run_sync, run_sync_preview
+from app.sync import ParseError, TokenExpiredError, parse_csv_from_bytes, run_sync, run_sync_preview
 
 templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
+
+
+# Phase 5.1: Rate limiting. Key by account_id when authenticated, else by IP.
+def _rate_limit_key(request: Request) -> str:
+    account_id = get_account_id_from_cookie(request.cookies.get(COOKIE_ACCOUNT))
+    if account_id:
+        return f"account:{account_id}"
+    return get_remote_address(request)
+
+
+_RATE_LIMIT_DEFAULT = "60/minute"
+_rate_limit_str = os.getenv("RATE_LIMIT", _RATE_LIMIT_DEFAULT).strip() or _RATE_LIMIT_DEFAULT
+limiter = Limiter(key_func=_rate_limit_key)
 
 
 # Max CSV upload size in bytes (default 10 MB). Can be overridden via env CSV_MAX_UPLOAD_BYTES.
@@ -51,9 +71,60 @@ try:
 except ValueError:
     MAX_CSV_UPLOAD_BYTES = _MAX_CSV_UPLOAD_BYTES_DEFAULT
 
+# Max number of valid CSV rows (default 1000). Enforced by parser. Env: CSV_MAX_ROWS.
+_CSV_MAX_ROWS_DEFAULT = 1000
+try:
+    MAX_CSV_ROWS = max(1, int(os.getenv("CSV_MAX_ROWS", str(_CSV_MAX_ROWS_DEFAULT))))
+except ValueError:
+    MAX_CSV_ROWS = max(1, _CSV_MAX_ROWS_DEFAULT)
+
+# Phase 1.1: default SECRET_KEY; production must set a different value.
+_SECRET_KEY_DEFAULT = "dev-secret-change-in-production"
+
+
+def _validate_config() -> None:
+    """Phase 1.1: Validate config at startup. Log warnings or exit on critical misconfiguration."""
+    log = logging.getLogger("app.startup")
+    base_lower = (BASE_URL or "").strip().lower()
+    is_https = base_lower.startswith("https://")
+    secret_is_default = (SECRET_KEY or "").strip() == _SECRET_KEY_DEFAULT
+
+    # OAuth: if client id is set, secret must be set
+    if JOBBER_CLIENT_ID and not (JOBBER_CLIENT_SECRET or "").strip():
+        log.error(
+            "JOBBER_CLIENT_ID is set but JOBBER_CLIENT_SECRET is missing or empty. "
+            "Set both in .env or leave both unset for health-only mode."
+        )
+        sys.exit(1)
+
+    # SECRET_KEY: warn if default; refuse to start in production with default
+    if secret_is_default:
+        if is_https:
+            log.error(
+                "SECRET_KEY must not be the default value in production (BASE_URL is HTTPS). "
+                "Set SECRET_KEY in .env to a random string."
+            )
+            sys.exit(1)
+        log.warning(
+            "SECRET_KEY is the default value. Set SECRET_KEY in .env to a random string for production."
+        )
+
+    # BASE_URL: must be http or https
+    if BASE_URL and not (base_lower.startswith("http://") or base_lower.startswith("https://")):
+        log.warning("BASE_URL should start with http:// or https://; got %r", BASE_URL[:50])
+
+    # Optional: warn if BASE_URL looks like localhost but SECRET_KEY is not default (production-like)
+    if not is_https and BASE_URL and "localhost" in base_lower and not secret_is_default:
+        log.warning(
+            "BASE_URL looks like localhost but SECRET_KEY is set (production-like). "
+            "Ensure BASE_URL matches your deployment for cookie security."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
+    _validate_config()
     init_db()
     yield
 
@@ -63,6 +134,48 @@ app = FastAPI(
     description="Sync wholesaler CSV pricing to Jobber Products & Services",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+
+
+async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """Phase 5.1: Return 429 JSON when rate limit exceeded."""
+    return JSONResponse(status_code=429, content={"error": "Too many requests; please try again later."})
+
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    """Phase 2.2: Assign request_id for correlation; add X-Request-ID to response."""
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+def _request_id(request: Request) -> str | None:
+    return getattr(request.state, "request_id", None)
+
+
+# Phase 3.1: Generic user-facing message for unhandled errors (no stack traces to client).
+_USER_MSG_SERVER_ERROR = "Something went wrong; please try again."
+_USER_MSG_SESSION_EXPIRED = "Session expired; please reconnect to Jobber."
+
+
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Phase 3.1: Log full error with request_id; return 500 with safe message."""
+    log = get_app_logger()
+    log.error(
+        "Unhandled exception",
+        extra={"event": "server_error", "path": request.url.path, "request_id": _request_id(request), "error_type": type(exc).__name__},
+        exc_info=True,
+    )
+    return JSONResponse(status_code=500, content={"error": _USER_MSG_SERVER_ERROR})
+
+
+app.add_exception_handler(Exception, _unhandled_exception_handler)
 
 
 def _callback_uri() -> str:
@@ -124,9 +237,14 @@ async def oauth_callback(request: Request):
         return RedirectResponse(url="/dashboard?error=invalid_state", status_code=302)
 
     redirect_uri = _callback_uri()
+    log = get_app_logger()
     try:
         tokens = exchange_code_for_tokens(code, redirect_uri)
     except Exception as e:
+        log.warning(
+            "OAuth token exchange failed",
+            extra={"event": "oauth_error", "error_type": "token_exchange", "path": "/oauth/callback", "request_id": _request_id(request)},
+        )
         msg = quote(str(e)[:80], safe="")
         return RedirectResponse(
             url=f"/dashboard?error=token_exchange&message={msg}",
@@ -139,6 +257,10 @@ async def oauth_callback(request: Request):
     try:
         account = get_account_info(access_token)
     except Exception as e:
+        log.warning(
+            "OAuth account query failed",
+            extra={"event": "oauth_error", "error_type": "account_query", "path": "/oauth/callback", "request_id": _request_id(request)},
+        )
         msg = quote(str(e)[:80], safe="")
         return RedirectResponse(
             url=f"/dashboard?error=account_query&message={msg}",
@@ -190,6 +312,10 @@ async def oauth_callback(request: Request):
         samesite="lax",
         secure=_secure,
     )
+    log.info(
+        "Connect success",
+        extra={"event": "connect", "account_id": account_id, "path": "/oauth/callback", "request_id": _request_id(request)},
+    )
     return response
 
 
@@ -232,8 +358,16 @@ async def disconnect(request: Request):
         except Exception:
             pass  # e.g. token expired, already disconnected in Jobber; still clear local state
         delete_connection(account_id)
+    log = get_app_logger()
+    if account_id:
+        log.info(
+            "Disconnect",
+            extra={"event": "disconnect", "account_id": account_id, "path": "/disconnect", "request_id": _request_id(request)},
+        )
     response = RedirectResponse(url="/dashboard", status_code=302)
-    response.delete_cookie(COOKIE_ACCOUNT)
+    # Phase 1.3: use same path and secure as set_cookie so browser clears the cookie correctly
+    _secure = BASE_URL.strip().lower().startswith("https")
+    response.delete_cookie(COOKIE_ACCOUNT, path="/", secure=_secure, httponly=True, samesite="lax")
     return response
 
 
@@ -251,9 +385,27 @@ def _verify_jobber_webhook(body: bytes, signature_header: str | None) -> bool:
     return hmac.compare_digest(expected, signature_header.strip())
 
 
+# Phase 5.2: Webhook idempotency — ignore duplicate payloads within a short window.
+_WEBHOOK_DEDUP_TTL_SEC = 300
+_webhook_dedup_cache: dict[tuple[str, str, str], float] = {}  # (topic, account_id, body_hash) -> expiry (monotonic)
+
+
+def _prune_webhook_dedup_cache(now: float) -> None:
+    """Remove expired entries from webhook dedupe cache."""
+    expired = [k for k, exp in _webhook_dedup_cache.items() if exp <= now]
+    for k in expired:
+        del _webhook_dedup_cache[k]
+
+
+def _webhook_dedup_key(topic: str, account_id: str, body: bytes) -> tuple[str, str, str]:
+    """Key for idempotency: (topic, account_id, body_hash)."""
+    return (topic, account_id, hashlib.sha256(body).hexdigest())
+
+
 @app.post("/webhooks/jobber")
+@limiter.limit(_rate_limit_str)
 async def webhook_jobber(request: Request):
-    """Step 6: Jobber disconnect webhook. Verify HMAC, parse topic/accountId, delete_connection. Return 200 quickly."""
+    """Step 6: Jobber disconnect webhook. Verify HMAC, parse topic/accountId, delete_connection. Phase 5.2: dedupe by (topic, accountId, body hash)."""
     body = await request.body()
     signature = request.headers.get("X-Jobber-Hmac-SHA256")
     if not _verify_jobber_webhook(body, signature):
@@ -265,8 +417,19 @@ async def webhook_jobber(request: Request):
     event = (data.get("data") or {}).get("webHookEvent") or {}
     topic = event.get("topic") or ""
     account_id = event.get("accountId")
+    account_id_str = str(account_id) if account_id is not None else ""
+    now = time.monotonic()
+    _prune_webhook_dedup_cache(now)
+    dedupe_key = _webhook_dedup_key(topic, account_id_str, body)
+    if dedupe_key in _webhook_dedup_cache and _webhook_dedup_cache[dedupe_key] > now:
+        return JSONResponse(status_code=200, content={"ok": True})
     if topic.upper() == "APP_DISCONNECT" and account_id:
         delete_connection(str(account_id))
+        get_app_logger().info(
+            "Webhook received",
+            extra={"event": "webhook", "topic": topic, "account_id": str(account_id), "path": "/webhooks/jobber", "request_id": _request_id(request)},
+        )
+    _webhook_dedup_cache[dedupe_key] = now + _WEBHOOK_DEDUP_TTL_SEC
     return JSONResponse(status_code=200, content={"ok": True})
 
 
@@ -302,6 +465,7 @@ async def _read_upload_file_with_limit(file: UploadFile, max_bytes: int) -> byte
 
 
 @app.post("/api/sync/preview")
+@limiter.limit(_rate_limit_str)
 async def api_sync_preview(
     request: Request,
     file: UploadFile = File(...),
@@ -327,16 +491,46 @@ async def api_sync_preview(
         return JSONResponse(status_code=413, content={"error": str(e)})
     except Exception:
         return JSONResponse(status_code=400, content={"error": "Unable to read uploaded file."})
+    log = get_app_logger()
     try:
-        parse_result = parse_csv_from_bytes(content)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        parse_result = parse_csv_from_bytes(content, max_rows=MAX_CSV_ROWS)
+    except ParseError as e:
+        log.warning(
+            "Preview parse error",
+            extra={"event": "parse_error", "error_type": e.code, "account_id": account_id, "path": "/api/sync/preview", "request_id": _request_id(request)},
+        )
+        return JSONResponse(status_code=400, content={"error": e.message})
     fuzzy_on, fuzzy_t = _parse_fuzzy_form(fuzzy_match, fuzzy_threshold)
     rows = parse_result.rows
-    result = await asyncio.to_thread(run_sync_preview, account_id, rows, fuzzy_on, fuzzy_t)
-    # Include parse summary for visibility (no silent skips)
+    log.info(
+        "Preview start",
+        extra={"event": "preview_start", "account_id": account_id, "row_count": len(rows), "path": "/api/sync/preview", "request_id": _request_id(request)},
+    )
+    t0 = datetime.datetime.now(datetime.UTC)
+    try:
+        result = await asyncio.to_thread(run_sync_preview, account_id, rows, fuzzy_on, fuzzy_t)
+    except TokenExpiredError:
+        log.warning(
+            "Session expired during preview",
+            extra={"event": "session_expired", "account_id": account_id, "path": "/api/sync/preview", "request_id": _request_id(request)},
+        )
+        return JSONResponse(status_code=403, content={"error": _USER_MSG_SESSION_EXPIRED})
+    duration_ms = int((datetime.datetime.now(datetime.UTC) - t0).total_seconds() * 1000)
     result["parse_skipped_total"] = parse_result.skipped_total
     result["parse_skipped_reasons"] = parse_result.skipped_reasons
+    log.info(
+        "Preview end",
+        extra={
+            "event": "preview_end",
+            "account_id": account_id,
+            "duration_ms": duration_ms,
+            "increases": result.get("increases"),
+            "decreases": result.get("decreases"),
+            "unchanged": result.get("unchanged"),
+            "path": "/api/sync/preview",
+            "request_id": _request_id(request),
+        },
+    )
     if result.get("error") and not result.get("skus_not_found") and result.get("increases", 0) == 0 and result.get("decreases", 0) == 0 and result.get("unchanged", 0) == 0:
         return JSONResponse(status_code=403, content=result)
     return result
@@ -353,6 +547,7 @@ def _parse_markup_percent(markup_percent: str | None) -> float:
 
 
 @app.post("/api/sync")
+@limiter.limit(_rate_limit_str)
 async def api_sync(
     request: Request,
     file: UploadFile = File(...),
@@ -380,17 +575,55 @@ async def api_sync(
         return JSONResponse(status_code=413, content={"error": str(e)})
     except Exception:
         return JSONResponse(status_code=400, content={"error": "Unable to read uploaded file."})
+    log = get_app_logger()
     try:
-        parse_result = parse_csv_from_bytes(content)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        parse_result = parse_csv_from_bytes(content, max_rows=MAX_CSV_ROWS)
+    except ParseError as e:
+        log.warning(
+            "Sync parse error",
+            extra={"event": "parse_error", "error_type": e.code, "account_id": account_id, "path": "/api/sync", "request_id": _request_id(request)},
+        )
+        return JSONResponse(status_code=400, content={"error": e.message})
     only_increase = only_increase_cost and str(only_increase_cost).strip().lower() in ("true", "1", "yes")
     fuzzy_on, fuzzy_t = _parse_fuzzy_form(fuzzy_match, fuzzy_threshold)
     rows = parse_result.rows
     markup = _parse_markup_percent(markup_percent)
-    result = await asyncio.to_thread(run_sync, account_id, rows, only_increase, fuzzy_on, fuzzy_t, markup)
+    log.info(
+        "Sync start",
+        extra={
+            "event": "sync_start",
+            "account_id": account_id,
+            "row_count": len(rows),
+            "sync_options": f"only_increase={only_increase} fuzzy={fuzzy_on} markup={markup}",
+            "path": "/api/sync",
+            "request_id": _request_id(request),
+        },
+    )
+    t0 = datetime.datetime.now(datetime.UTC)
+    try:
+        result = await asyncio.to_thread(run_sync, account_id, rows, only_increase, fuzzy_on, fuzzy_t, markup)
+    except TokenExpiredError:
+        log.warning(
+            "Session expired during sync",
+            extra={"event": "session_expired", "account_id": account_id, "path": "/api/sync", "request_id": _request_id(request)},
+        )
+        return JSONResponse(status_code=403, content={"error": _USER_MSG_SESSION_EXPIRED})
+    duration_ms = int((datetime.datetime.now(datetime.UTC) - t0).total_seconds() * 1000)
     result["parse_skipped_total"] = parse_result.skipped_total
     result["parse_skipped_reasons"] = parse_result.skipped_reasons
+    log.info(
+        "Sync end",
+        extra={
+            "event": "sync_end",
+            "account_id": account_id,
+            "duration_ms": duration_ms,
+            "updated": result.get("updated"),
+            "skipped": result.get("skipped_protected"),
+            "not_found": len(result.get("skus_not_found") or []),
+            "path": "/api/sync",
+            "request_id": _request_id(request),
+        },
+    )
     if result.get("error") and result["updated"] == 0 and not result.get("skus_not_found"):
         return JSONResponse(status_code=403, content=result)
     return result
@@ -402,6 +635,7 @@ def _is_dev_server() -> bool:
 
 
 @app.post("/api/sync/test-run")
+@limiter.limit(_rate_limit_str)
 async def api_sync_test_run(request: Request):
     """Test sync using wholesaler_prices.csv from project root, 25%% markup. Enabled only when BASE_URL contains localhost."""
     if not _is_dev_server():
@@ -414,13 +648,20 @@ async def api_sync_test_run(request: Request):
     if not csv_path.is_file():
         return JSONResponse(status_code=400, content={"error": f"CSV not found: {csv_path}"})
     try:
-        parse_result = parse_csv_from_bytes(csv_path.read_bytes())
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        parse_result = parse_csv_from_bytes(csv_path.read_bytes(), max_rows=MAX_CSV_ROWS)
+    except ParseError as e:
+        return JSONResponse(status_code=400, content={"error": e.message})
     rows = parse_result.rows
-    result = await asyncio.to_thread(
-        run_sync, account_id, rows, only_increase_cost=False, fuzzy_match=False, markup_percent=25.0
-    )
+    try:
+        result = await asyncio.to_thread(
+            run_sync, account_id, rows, only_increase_cost=False, fuzzy_match=False, markup_percent=25.0
+        )
+    except TokenExpiredError:
+        get_app_logger().warning(
+            "Session expired during test-run",
+            extra={"event": "session_expired", "account_id": account_id, "path": "/api/sync/test-run", "request_id": _request_id(request)},
+        )
+        return JSONResponse(status_code=403, content={"error": _USER_MSG_SESSION_EXPIRED})
     return result
 
 
@@ -437,5 +678,7 @@ async def test_sync_page(request: Request):
 
 @app.get("/health")
 async def health():
-    """For deploy health checks (e.g. Render, Railway)."""
-    return {"status": "ok"}
+    """Phase 2.3: Health check with DB. Returns 200 + db status when healthy, 503 when DB unreachable."""
+    if not check_db():
+        return JSONResponse(status_code=503, content={"status": "unhealthy", "db": "error"})
+    return {"status": "ok", "db": "ok"}

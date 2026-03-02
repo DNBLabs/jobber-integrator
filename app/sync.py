@@ -105,20 +105,88 @@ class TokenExpiredError(Exception):
     """Raised when Jobber returns 401; caller should refresh and retry."""
 
 
+class ParseError(Exception):
+    """
+    Raised when CSV parsing fails. Routes map this to HTTP 400 with the same user-facing message.
+    code: one of missing_columns, no_valid_rows, unsupported_encoding, too_many_rows.
+    message: safe, user-facing text (no stack traces or raw encoding names).
+    """
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+# Step 4: header aliases (case-insensitive, spaces normalized to underscore)
+def _normalize_header_cell(cell: str) -> str:
+    """Strip, lowercase, collapse spaces to single underscore for alias matching."""
+    return re.sub(r"\s+", "_", (cell or "").strip().lower())
+
+
+# Canonical column names and allowed aliases (normalized form)
+_ALIASES_PART_NUM = {"part_num", "part_number", "partnumber"}
+_ALIASES_TRADE_COST = {"trade_cost", "tradecost"}
+_ALIASES_DESCRIPTION = {"description", "desc", "product_description"}
+_USER_MSG_MISSING_COLUMNS = (
+    "CSV must contain columns for part number and cost (e.g. Part_Num, Part Number, Trade_Cost, Trade Cost)."
+)
+_USER_MSG_UNSUPPORTED_ENCODING = "CSV encoding could not be detected. Please save the file as UTF-8."
+
+
+def _parse_cost(raw: str) -> float | None:
+    """
+    Parse a cost string into a non-negative float. Supports £ $ €, trailing USD/GBP/EUR,
+    US (1,234.56) and EU (1.234,56 or 1 234,56) formats. Returns None if invalid or negative.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    # Strip common currency symbols
+    for sym in ("£", "$", "€"):
+        s = s.replace(sym, "")
+    # Strip trailing currency codes (with optional space)
+    s = re.sub(r"\s*(?:USD|GBP|EUR)\s*$", "", s, flags=re.IGNORECASE)
+    s = s.strip()
+    # Remove spaces used as thousands
+    s = s.replace(" ", "")
+    if not s:
+        return None
+    # Optional leading minus (we reject negative)
+    if s.startswith("-"):
+        return None
+    # Decimal heuristic: if both comma and period, last one is decimal
+    comma_pos = s.rfind(",")
+    period_pos = s.rfind(".")
+    if comma_pos >= 0 and period_pos >= 0:
+        last_is_decimal = "," if comma_pos > period_pos else "."
+        if last_is_decimal == ",":
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    # Now s should be digits and at most one period
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    if val < 0:
+        return None
+    return val
+
+
 def _decode_csv_content(content: bytes) -> str:
     """
     Decode CSV bytes to text. Tries utf-8-sig, then cp1252 (Windows-1252).
-    Raises ValueError with a clear message if both fail.
+    Raises ParseError(unsupported_encoding) if both fail.
     """
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             return content.decode(encoding)
         except UnicodeDecodeError:
             continue
-    raise ValueError(
-        "CSV encoding could not be detected (tried UTF-8, Windows-1252). "
-        "Please save the file as UTF-8."
-    )
+    raise ParseError("unsupported_encoding", _USER_MSG_UNSUPPORTED_ENCODING)
 
 
 @dataclass
@@ -130,7 +198,7 @@ class ParseResult:
     skipped_reasons: Dict[str, int]
 
 
-def parse_csv_from_bytes(content: bytes) -> ParseResult:
+def parse_csv_from_bytes(content: bytes, max_rows: int | None = None) -> ParseResult:
     """
     Parse CSV from bytes per RFC 4180.
 
@@ -139,33 +207,53 @@ def parse_csv_from_bytes(content: bytes) -> ParseResult:
     when no Description column. skipped_total / skipped_reasons report how many data rows were
     ignored and why.
 
-    Raises ValueError if columns missing or no valid rows.
+    If max_rows is set and the number of valid rows exceeds it, raises ParseError(too_many_rows).
+    Use max_rows=None for no limit.
+
+    Raises ParseError if columns missing, no valid rows, or too many rows (when max_rows is set).
     """
-    required = {"Part_Num", "Trade_Cost"}
     rows: List[Tuple[str, float, str]] = []
     skipped_reasons: Dict[str, int] = {}
 
     def _inc(reason: str) -> None:
         skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
 
-    text = _decode_csv_content(content)
-    text = re.sub(r",\s*\"", ",\"", text)
+    try:
+        text = _decode_csv_content(content)
+    except ParseError:
+        raise
     full_reader = csv.reader(io.StringIO(text))
     all_rows = list(full_reader)
-    header_idx = None
+
+    # Find first row that has both part-number and cost columns (by alias)
+    header_idx: int | None = None
+    part_num_idx: int | None = None
+    trade_cost_idx: int | None = None
+    desc_idx: int | None = None
+
     for i, row in enumerate(all_rows):
-        cells = {c.strip() for c in row}
-        if required.issubset(cells):
+        normalized = [_normalize_header_cell(c) for c in row]
+        idx_part: int | None = None
+        idx_cost: int | None = None
+        idx_desc: int | None = None
+        for j, norm in enumerate(normalized):
+            if norm in _ALIASES_PART_NUM and idx_part is None:
+                idx_part = j
+            elif norm in _ALIASES_TRADE_COST and idx_cost is None:
+                idx_cost = j
+            elif norm in _ALIASES_DESCRIPTION and idx_desc is None:
+                idx_desc = j
+        if idx_part is not None and idx_cost is not None:
             header_idx = i
+            part_num_idx = idx_part
+            trade_cost_idx = idx_cost
+            desc_idx = idx_desc
             break
-    if header_idx is None:
-        raise ValueError("CSV must contain columns Part_Num and Trade_Cost")
-    fieldnames = [c.strip() for c in all_rows[header_idx]]
-    if not required.issubset(set(fieldnames)):
-        raise ValueError("CSV must contain columns Part_Num and Trade_Cost")
-    part_num_idx = fieldnames.index("Part_Num")
-    trade_cost_idx = fieldnames.index("Trade_Cost")
-    desc_idx = fieldnames.index("Description") if "Description" in fieldnames else None
+
+    if header_idx is None or part_num_idx is None or trade_cost_idx is None:
+        raise ParseError("missing_columns", _USER_MSG_MISSING_COLUMNS)
+
+    fieldnames = all_rows[header_idx]
     for row in all_rows[header_idx + 1 :]:
         if len(row) <= max(part_num_idx, trade_cost_idx):
             _inc("row_too_short")
@@ -179,15 +267,26 @@ def parse_csv_from_bytes(content: bytes) -> ParseResult:
         if not part_num:
             _inc("empty_part_num")
             continue
-        trade_cost_clean = trade_cost_raw.replace("£", "").replace(",", "").strip()
-        try:
-            cost = float(trade_cost_clean)
-        except ValueError:
+        cost = _parse_cost(trade_cost_raw)
+        if cost is None:
             _inc("invalid_cost")
             continue
         rows.append((part_num, cost, description))
     if not rows:
-        raise ValueError("No valid rows to process")
+        total_skipped = sum(skipped_reasons.values())
+        if total_skipped:
+            msg = (
+                f"No valid rows to process. {total_skipped} row(s) were skipped "
+                "(e.g. empty part number, invalid cost)."
+            )
+        else:
+            msg = "No valid rows to process."
+        raise ParseError("no_valid_rows", msg)
+    if max_rows is not None and len(rows) > max_rows:
+        raise ParseError(
+            "too_many_rows",
+            f"CSV has too many rows; maximum is {max_rows}.",
+        )
     skipped_total = sum(skipped_reasons.values())
     return ParseResult(rows=rows, skipped_total=skipped_total, skipped_reasons=skipped_reasons)
 

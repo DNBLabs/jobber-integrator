@@ -26,6 +26,19 @@ def _get_connection() -> sqlite3.Connection:
     return conn
 
 
+def check_db() -> bool:
+    """Phase 2.3: Return True if DB is reachable (e.g. for health check)."""
+    try:
+        conn = _get_connection()
+        try:
+            conn.execute("SELECT 1")
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
 def init_db() -> None:
     """Create tables if they don't exist. Step 3: add expires_at column if missing."""
     conn = _get_connection()

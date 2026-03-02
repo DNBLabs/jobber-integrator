@@ -25,6 +25,9 @@ from app.database import init_db, save_connection, get_connection_by_account_id,
 @pytest.fixture
 def client():
     init_db()
+    # Phase 5.1: Reset rate limiter so tests don't see 429 from other files (e.g. test_rate_limit_returns_429_phase5).
+    if hasattr(app.state, "limiter") and hasattr(app.state.limiter, "_storage"):
+        app.state.limiter._storage.reset()
     return TestClient(app)
 
 
@@ -140,3 +143,18 @@ def test_webhook_jobber_idempotent(client):
     sig = _hmac_for(body, JOBBER_CLIENT_SECRET)
     r = client.post("/webhooks/jobber", content=body, headers={"Content-Type": "application/json", "X-Jobber-Hmac-SHA256": sig})
     assert r.status_code == 200
+
+
+def test_webhook_duplicate_payload_deduped_phase5(client):
+    """Phase 5.2: Identical webhook payload sent twice returns 200 both times; connection deleted only once."""
+    save_connection("dedupe-acc", "DedupeTest", "at", "rt")
+    payload = {"data": {"webHookEvent": {"topic": "APP_DISCONNECT", "accountId": "dedupe-acc", "appId": "x"}}}
+    body = json.dumps(payload).encode("utf-8")
+    sig = _hmac_for(body, JOBBER_CLIENT_SECRET)
+    headers = {"Content-Type": "application/json", "X-Jobber-Hmac-SHA256": sig}
+    r1 = client.post("/webhooks/jobber", content=body, headers=headers)
+    assert r1.status_code == 200
+    assert get_connection_by_account_id("dedupe-acc") is None
+    r2 = client.post("/webhooks/jobber", content=body, headers=headers)
+    assert r2.status_code == 200
+    assert r2.json() == {"ok": True}

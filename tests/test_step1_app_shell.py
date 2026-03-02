@@ -5,6 +5,7 @@ Step 1 = app runs, public routes (health, manage URL), config from env, DB init.
 No OAuth required to reach the shell; these tests define "Step 1 done".
 """
 import os
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,7 +97,33 @@ def test_health_no_trailing_slash(client):
     assert r.status_code == 200
 
 
+def test_health_503_when_db_unhealthy(client):
+    """Phase 2.3: /health returns 503 when DB check fails."""
+    with patch("app.main.check_db", return_value=False):
+        r = client.get("/health")
+    assert r.status_code == 503
+    data = r.json()
+    assert data.get("status") == "unhealthy"
+    assert data.get("db") == "error"
+
+
 def test_unknown_route_returns_404(client):
     """Step 1: Unknown routes return 404 (no 500)."""
     r = client.get("/unknown-route")
     assert r.status_code == 404
+
+
+def test_rate_limit_returns_429_phase5(client):
+    """Phase 5.1: Exceeding rate limit (60/min default) on POST /webhooks/jobber returns 429."""
+    # Default limit is 60/minute; eventually we get 429 from same key (IP).
+    for _ in range(65):
+        r = client.post("/webhooks/jobber", content=b'{"data":{}}', headers={"Content-Type": "application/json"})
+        if r.status_code == 429:
+            data = r.json()
+            assert "error" in data
+            assert "Too many" in data.get("error", "") or "try again" in data.get("error", "").lower()
+            # Reset limiter storage so other test files (e.g. test_step6) don't see exhausted state
+            if hasattr(client.app.state, "limiter") and hasattr(client.app.state.limiter, "_storage"):
+                client.app.state.limiter._storage.reset()
+            return
+    pytest.fail("Expected 429 before 65 requests")

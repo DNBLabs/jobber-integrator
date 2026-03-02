@@ -33,9 +33,12 @@ def test_root_redirects_to_dashboard(client):
 
 
 def test_health_ok(client):
+    """Health returns 200 and status ok; Phase 2.3 includes db status."""
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    data = r.json()
+    assert data.get("status") == "ok"
+    assert data.get("db") == "ok"
 
 
 # ---- Connect: missing client id ----

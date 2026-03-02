@@ -1,7 +1,9 @@
 """
 One-off script to run sync with markup and verify the defaultUnitCost mutation.
 Uses the first connected account in the DB and wholesaler_prices.csv.
+Respects CSV_MAX_ROWS env (default 1000) for row limit.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -9,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.database import _get_connection, init_db
-from app.sync import parse_csv_from_bytes, run_sync
+from app.sync import ParseError, parse_csv_from_bytes, run_sync
 
 def main():
     init_db()
@@ -33,9 +35,14 @@ def main():
 
     content = csv_path.read_bytes()
     try:
-        parse_result = parse_csv_from_bytes(content)
-    except ValueError as e:
-        print(f"CSV error: {e}")
+        max_rows = int(os.getenv("CSV_MAX_ROWS", "1000"))
+        max_rows = max(1, max_rows)
+    except (TypeError, ValueError):
+        max_rows = 1000
+    try:
+        parse_result = parse_csv_from_bytes(content, max_rows=max_rows)
+    except ParseError as e:
+        print(f"CSV error: {e.message}")
         return 1
 
     rows = parse_result.rows

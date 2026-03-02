@@ -14,11 +14,11 @@ This document outlines a clear path to make the Price Sync app robust and produc
 
 ---
 
-## Phase 1: Configuration and safety rails
+## Phase 1: Configuration and safety rails — **DONE**
 
 **Goal:** Fail fast on bad config and cap resource use so the app doesn’t fall over on edge inputs.
 
-### 1.1 Config validation at startup
+### 1.1 Config validation at startup — **DONE**
 
 - **Current state:** App starts even when `JOBBER_CLIENT_ID` or `JOBBER_CLIENT_SECRET` are missing or empty. Users only discover this when they click Connect. `SECRET_KEY` has a weak default and is not checked.
 - **Implementation path:**
@@ -27,8 +27,9 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **SECRET_KEY:** If `SECRET_KEY` is still the literal default (e.g. `"dev-secret-change-in-production"`), log a **warning** at startup. If you can infer “production” (e.g. `BASE_URL` starts with `https://`), require a non-default `SECRET_KEY` and refuse to start (or warn loudly) when it’s default.
   - **BASE_URL:** When non-empty, validate it’s a sensible URL (starts with `http://` or `https://`); log a warning if it looks wrong (e.g. still `http://localhost:8000` while `SECRET_KEY` is production-like).
 - **Success:** Misconfiguration is caught at startup or clearly warned; no silent failures when users hit Connect.
+- **Implemented:** `_validate_config()` in `app/main.py` at lifespan startup: exit if JOBBER_CLIENT_ID set but JOBBER_CLIENT_SECRET empty; exit if BASE_URL is HTTPS and SECRET_KEY is default; warnings for default SECRET_KEY (HTTP), invalid BASE_URL, localhost + non-default SECRET_KEY.
 
-### 1.2 File upload and CSV row limits
+### 1.2 File upload and CSV row limits — **DONE**
 
 - **Current state:** CSV upload uses `await file.read()` with no size limit. Parse has no row cap. Very large files can exhaust memory or cause long-running syncs and timeouts.
 - **Implementation path:**
@@ -36,8 +37,9 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **Max rows:** The parser refactor (done first) already enforces a row limit and returns a structured result; the route or parser uses a configurable limit (e.g. env `CSV_MAX_ROWS`). When over limit, reject with a clear message (“CSV has N rows; maximum is M”). Apply the same limit to both sync and preview. See [PARSER_IMPROVEMENT_PLAN.md](PARSER_IMPROVEMENT_PLAN.md) sections 7 and 8.
   - **Docs:** In CSV format / README, state the max file size and max rows so users know what to expect.
 - **Success:** Oversized or over-long CSVs are rejected with a clear error; no unbounded memory or runtimes.
+- **Implemented:** File size limit (10 MB, `CSV_MAX_UPLOAD_BYTES`), chunked read, 413; row limit in parser (`CSV_MAX_ROWS`, 1000); README documents both.
 
-### 1.3 Cookie `secure` flag
+### 1.3 Cookie `secure` flag — **DONE**
 
 - **Current state:** Cookies use `httponly=True` and `samesite="lax"` but not `secure`. On HTTPS, cookies should not be sent over HTTP.
 - **Implementation path:**
@@ -45,14 +47,15 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **Logic:** Set `secure=True` when the app is served over HTTPS. Derive this from config (e.g. `BASE_URL.startswith("https://")`) so it’s correct in production without code changes. In local dev with `http://localhost`, keep `secure=False`.
   - **Docs:** Note in deployment docs that `BASE_URL` must be correct so cookie security is applied in production.
 - **Success:** In production (HTTPS), session cookies are not sent on HTTP; in dev, behavior unchanged.
+- **Implemented:** `secure=BASE_URL.startswith("https")` on set_cookie (connect, callback) and delete_cookie (disconnect). README notes production BASE_URL and SECRET_KEY.
 
 ---
 
-## Phase 2: Observability
+## Phase 2: Observability — **DONE**
 
 **Goal:** You can see what the app is doing and whether it’s healthy, without guessing.
 
-### 2.1 Structured logging
+### 2.1 Structured logging — **DONE**
 
 - **Current state:** No logging. Failures and important events leave no trace except user-visible errors.
 - **Implementation path:**
@@ -62,7 +65,7 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **Where:** Use the standard `logging` library; configure once at startup (e.g. in lifespan or a small logging module). Optionally allow log level and output (stdout vs file) via env so production can send logs to a file or collector.
 - **Success:** A support or ops person can answer “did this user’s sync run?” and “why did it fail?” from logs alone.
 
-### 2.2 Request or correlation context (optional but recommended)
+### 2.2 Request or correlation context (optional but recommended) — **DONE**
 
 - **Goal:** Tie log lines for a single request (e.g. one sync or one webhook) together.
 - **Implementation path:**
@@ -71,7 +74,7 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **Scope:** At minimum, use it for sync, preview, and webhook; optionally for OAuth callback and disconnect.
 - **Success:** One sync’s logs can be grepped by a single id; user-reported “error ref X” maps to one request.
 
-### 2.3 Deep health check
+### 2.3 Deep health check — **DONE**
 
 - **Current state:** `/health` returns a static “ok” with no dependency checks.
 - **Implementation path:**
@@ -82,11 +85,11 @@ This document outlines a clear path to make the Price Sync app robust and produc
 
 ---
 
-## Phase 3: Error handling and resilience
+## Phase 3: Error handling and resilience — **DONE**
 
 **Goal:** External failures are handled predictably and logged; users see clear messages without leaking internals.
 
-### 3.1 Centralized error handling and user messages
+### 3.1 Centralized error handling and user messages — **DONE**
 
 - **Current state:** Errors are handled in each route or in sync; messages are ad hoc. Some failures may surface stack traces or raw exceptions to the client.
 - **Implementation path:**
@@ -95,36 +98,40 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **Consistency:** Prefer a single helper or middleware that turns “known error” vs “unknown exception” into a consistent JSON or HTML response so the dashboard and API behave the same.
 - **Success:** Users never see stack traces; they see clear, safe messages; ops see full details in logs.
 
-### 3.2 Timeouts and retries (review only)
+- **Implemented:** Global exception handler for `Exception`: logs at ERROR with request_id and exc_info, returns 500 with "Something went wrong; please try again." TokenExpiredError from sync/preview/test-run mapped to 403 "Session expired; please reconnect to Jobber." with WARNING log. ParseError and FileTooLargeError already return 400/413 with safe messages.
+
+### 3.2 Timeouts and retries (review only) — **DONE**
 
 - **Current state:** GraphQL and OAuth calls already use timeouts; sync retries once on 401 after refresh.
 - **Implementation path:**
   - **Review:** Confirm all outbound HTTP calls (Jobber GraphQL, OAuth token, account info, app disconnect) have explicit timeouts. Document the values (e.g. in JOBBER_SCHEMA_NOTES or a runbook).
   - **Optional:** If Jobber often returns 5xx or timeouts, consider one retry with backoff for idempotent operations (e.g. product fetch). Keep the current “single retry on 401” for auth. Do not add retries without logging so you can see flakiness.
 - **Success:** No call runs forever; retry policy is documented and visible in logs if you add more.
+- **Implemented:** Reviewed; OAuth 15s, GraphQL 30s. Documented in README. Single retry on 401 after refresh in sync (unchanged).
 
 ---
 
-## Phase 4: Dependencies and maintenance
+## Phase 4: Dependencies and maintenance — **DONE**
 
 **Goal:** Upgrades and security issues are manageable and predictable.
 
-### 4.1 Dependency pinning and audit
+### 4.1 Dependency pinning and audit — **DONE**
 
-- **Current state:** `requirements.txt` uses minimum versions (e.g. `>=`) and no upper bounds.
+- **Current state:** `requirements.txt` used minimum versions (e.g. `>=`) and no upper bounds.
 - **Implementation path:**
   - **Pinning:** After testing a known-good set, pin exact versions (e.g. `==`) or use a lockfile (e.g. `pip-tools` with `requirements.in` → `requirements.txt`). Document in README that deploys should install from the locked file.
   - **Audit:** Run `pip-audit` or `safety` (or your platform’s dependency scan) in CI or before release. Fix or document any known vulnerabilities; for optional or dev-only deps, document why a finding is accepted if so.
   - **Updates:** Periodically bump deps in a branch, run tests, and update the lockfile. Document the cadence (e.g. “every quarter” or “before each release”).
 - **Success:** Builds are reproducible; known vulnerable versions are not shipped; upgrade path is clear.
+- **Implemented:** requirements.txt pinned to exact versions (==). CI runs pip-audit after install. README: deploy from requirements.txt; update cadence (before release or quarterly), run pytest and pip-audit after bumps.
 
 ---
 
-## Phase 5: Optional hardening
+## Phase 5: Optional hardening — **DONE**
 
 **Goal:** Extra protection for multi-tenant or higher-risk environments; skip or defer if not needed.
 
-### 5.1 Rate limiting
+### 5.1 Rate limiting — **DONE**
 
 - **Current state:** No application-level rate limiting. A misbehaving client or script could hammer sync or webhooks.
 - **Implementation path:**
@@ -132,13 +139,15 @@ This document outlines a clear path to make the Price Sync app robust and produc
   - **How:** Either in-app (e.g. slowapi or a small middleware with an in-memory or Redis store) or at the reverse proxy (e.g. nginx rate_limit). Per-IP or per-account-id (when authenticated) are both reasonable.
   - **Defaults:** Start with generous limits (e.g. 60 syncs per minute per account or per IP) and tune from logs. Document the limits and how to change them.
 - **Success:** A single client cannot indefinitely starve others or trigger abuse alerts from Jobber.
+- **Implemented:** slowapi applied to POST `/api/sync`, `/api/sync/preview`, `/api/sync/test-run`, `/webhooks/jobber`. Key: account_id from cookie when present, else IP. Default `60/minute`; override via `RATE_LIMIT` env. 429 JSON when exceeded. Documented in README.
 
-### 5.2 Webhook idempotency or replay protection (optional)
+### 5.2 Webhook idempotency or replay protection (optional) — **DONE**
 
 - **Current state:** Webhook verifies HMAC and processes APP_DISCONNECT. Duplicate deliveries could cause duplicate delete_connection calls (likely harmless).
 - **Implementation path:**
   - **If needed:** Store the last processed webhook id or (topic, accountId, timestamp) and ignore duplicates within a short window. Requires a small table or cache and cleanup of old entries. Only add if you see duplicate deliveries or need strict idempotency.
 - **Success:** Duplicate webhook payloads don’t cause duplicate side effects (or you’ve documented that they’re safe as-is).
+- **Implemented:** In-memory dedupe by (topic, account_id, body SHA-256 hash); TTL 5 min. Duplicate payloads within window return 200 without reprocessing. Prune on each request. Documented in README.
 
 ---
 
