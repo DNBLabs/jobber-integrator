@@ -102,6 +102,7 @@ GitHub Actions (`.github/workflows/tests.yml`) runs the test matrix and **`pip-a
 ## Documentation
 
 - **[docs/README.md](docs/README.md)** — doc index  
+- **[docs/SECURITY.md](docs/SECURITY.md)** — handling `.env` and leaked credentials  
 - **[docs/DEPLOYMENT_AND_MARKETPLACE_PLAN.md](docs/DEPLOYMENT_AND_MARKETPLACE_PLAN.md)** — optional path to production hosting & Jobber App Marketplace  
 - **[docs/JOBBER_SCHEMA_NOTES.md](docs/JOBBER_SCHEMA_NOTES.md)** — GraphQL notes  
 
