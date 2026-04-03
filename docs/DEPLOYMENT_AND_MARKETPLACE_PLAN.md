@@ -1,6 +1,6 @@
 # Deployment and Marketplace Plan
 
-This document outlines the steps to **deploy** the Price Sync app and **list it on the Jobber App Marketplace**. The app is already production-ready (see [PRODUCTION_READINESS_PLAN.md](PRODUCTION_READINESS_PLAN.md)); this plan covers hosting, go-live, and submission.
+This document outlines the steps to **deploy** the Price Sync app and **list it on the Jobber App Marketplace**. The app is already production-ready (see [archive/PRODUCTION_READINESS_PLAN.md](archive/PRODUCTION_READINESS_PLAN.md)); this plan covers hosting, go-live, and submission.
 
 ---
 
@@ -157,8 +157,8 @@ You can add monetization before or after approval; it’s independent of listing
 
 ## References
 
-- **App behavior and config:** [README.md](README.md)
-- **Production readiness (what’s already done):** [PRODUCTION_READINESS_PLAN.md](PRODUCTION_READINESS_PLAN.md)
-- **Marketplace context and checklist:** [MARKETPLACE_ROADMAP.md](MARKETPLACE_ROADMAP.md)
+- **App behavior and config:** [README.md](../README.md)
+- **Production readiness (historical):** [archive/PRODUCTION_READINESS_PLAN.md](archive/PRODUCTION_READINESS_PLAN.md)
+- **Marketplace context:** [MARKETPLACE_ROADMAP.md](MARKETPLACE_ROADMAP.md)
 - **Jobber Developer Center:** [developer.getjobber.com](https://developer.getjobber.com)
 - **App Marketplace:** [apps.getjobber.com/app_marketplace](https://apps.getjobber.com/app_marketplace)

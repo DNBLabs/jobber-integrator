@@ -1,5 +1,7 @@
 # Test CSV: test_sync_scenarios.csv
 
+The file is in the **project root:** `../test_sync_scenarios.csv` (relative to this doc).
+
 Use this file to manually test all sync and preview behaviours. The app matches **Part_Num** to Jobber product **name** (or **code** if your Jobber schema supports it).
 
 ## Setup in Jobber first

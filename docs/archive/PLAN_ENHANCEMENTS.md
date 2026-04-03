@@ -216,7 +216,7 @@ This document nails down **how** to implement each of the five enhancements. No 
 
 ### What we need from Jobber
 
-- **Schema discovery:** The mutation or type that has `internalUnitCost` likely has a field for selling price—e.g. selling price. **Done:** we use `defaultUnitCost` (see JOBBER_SCHEMA_NOTES.md). The exact field name and whether it’s in the same `productsAndServicesEdit` input or a different mutation (e.g. “set price”).
+- **Schema discovery:** The mutation or type that has `internalUnitCost` likely has a field for selling price—e.g. selling price. **Done:** we use `defaultUnitCost` (see [JOBBER_SCHEMA_NOTES.md](../JOBBER_SCHEMA_NOTES.md)). The exact field name and whether it’s in the same `productsAndServicesEdit` input or a different mutation (e.g. “set price”).
    - Check: `productsAndServicesEdit` input type (or the product type) for a price/selling-price field. If it’s the same mutation, we send both `internalUnitCost` and `defaultUnitCost` in one call. If separate mutation, we do cost update then price update (two calls per product, more rate-limit impact).
 
 ### Implementation plan

@@ -1,65 +1,112 @@
 # Jobber Integrator
 
-Sync wholesaler CSV pricing to Jobber Products & Services via the GraphQL API.
+**Portfolio project:** Integrate wholesaler **CSV pricing** with [Jobber](https://www.getjobber.com/) **Products & Services** via the **GraphQL API** — multi-tenant **OAuth** web app plus an optional **CLI** for single-account use.
 
-- **CLI** (single account): run `sync_prices_to_jobber.py` with a token in `.env`.
-- **Web app** (marketplace): multi-tenant app with OAuth and token refresh (Steps 2–3). Connect from dashboard, then sync CSV (Step 4+).
+This repository is maintained as a **demonstration of backend and reliability practices** (not a hosted SaaS). Run it **locally** with your own [Jobber Developer Center](https://developer.getjobber.com/) app credentials.
 
-## Dependencies (Phase 4.1)
+---
 
-Dependencies are pinned in `requirements.txt` for reproducible installs. Deploy from this file. CI runs `pip-audit` to check for known vulnerabilities. To update: bump versions in `requirements.txt`, run `pytest` and `pip-audit` (e.g. before each release or quarterly).
+## Highlights
 
-## CLI
+| Area | What this repo shows |
+|------|---------------------|
+| **API integration** | OAuth2 (authorize + callback + refresh), GraphQL queries/mutations, webhooks with HMAC verification |
+| **Product logic** | Robust CSV parsing (encoding, column aliases, international cost formats), sync + preview, row/upload limits |
+| **Reliability** | Structured JSON logging, request correlation IDs, deep `/health` (includes DB check), global error handling (no stack traces to clients) |
+| **Security-minded** | Env-based secrets, session cookies, rate limiting (`slowapi`), webhook idempotency window |
+| **Engineering hygiene** | Pinned dependencies, `pip-audit` in CI, pytest suite |
+
+**Stack:** Python 3.11+ · FastAPI · SQLite (default) · Jinja2 templates · Jobber Design CSS (CDN)
+
+---
+
+## Repository layout
+
+```
+.
+├── .github/
+│   └── workflows/
+│       └── tests.yml          # CI: pytest + pip-audit
+├── app/
+│   ├── main.py                # FastAPI: OAuth, dashboard, sync API, webhooks
+│   ├── sync.py                # CSV parse + Jobber GraphQL sync/preview
+│   ├── jobber_oauth.py        # Token exchange & refresh
+│   ├── database.py            # Per-account token storage (SQLite)
+│   ├── logging_config.py      # JSON log formatter
+│   ├── config.py              # Environment configuration
+│   ├── cookies.py             # Signed session cookies
+│   └── templates/             # Dashboard & dev test-sync UI
+├── docs/
+│   ├── README.md              # Index of documentation
+│   ├── DEPLOYMENT_AND_MARKETPLACE_PLAN.md  # Optional: host + marketplace steps
+│   ├── MARKETPLACE_ROADMAP.md
+│   ├── JOBBER_SCHEMA_NOTES.md
+│   ├── TEST_CSV_README.md
+│   └── archive/               # Historical plans & completed checklists
+├── tests/                     # Pytest: API, OAuth, sync, UI, webhooks
+├── sync_prices_to_jobber.py   # CLI (single token in .env)
+├── run_sync_check.py          # Helper: run sync from sample CSV
+├── run_webapp.ps1             # Windows helper to start uvicorn
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
+Sample CSVs at repo root: `wholesaler_prices.csv`, `test_sync_scenarios.csv` (see `docs/TEST_CSV_README.md`).
+
+---
+
+## Quick start (web app, local)
+
+1. **Python 3.11+** and a virtualenv (recommended).
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate    # Windows: .venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+2. Copy **`.env.example`** → **`.env`** and set at least `JOBBER_CLIENT_ID`, `JOBBER_CLIENT_SECRET`, and a non-default **`SECRET_KEY`**. In Jobber Developer Center, set the OAuth callback to match **`BASE_URL`** (e.g. `http://localhost:8000/oauth/callback`).
+
+3. Start the app:
+
+   ```bash
+   uvicorn app.main:app --reload --port 8000
+   ```
+
+   Open **http://localhost:8000** → connect to Jobber → use the dashboard to upload a CSV. **Health:** http://localhost:8000/health
+
+---
+
+## CLI (single account)
+
+With `JOBBER_ACCESS_TOKEN` in `.env`:
 
 ```bash
-pip install -r requirements.txt
-# Add JOBBER_ACCESS_TOKEN to .env
-python sync_prices_to_jobber.py --dry-run   # preview
-python sync_prices_to_jobber.py              # sync
+python sync_prices_to_jobber.py --dry-run
+python sync_prices_to_jobber.py
 ```
 
-## Web app (OAuth + token refresh)
+---
 
-1. Copy `.env.example` to `.env` and fill in your values.
-2. In [Jobber Developer Center](https://developer.getjobber.com/apps), open your app and set **OAuth Callback URL** to `http://localhost:8000/oauth/callback` (local) or `https://your-domain.com/oauth/callback` (production). Must match `BASE_URL` + `/oauth/callback`.
-3. In `.env` set `JOBBER_CLIENT_ID`, `JOBBER_CLIENT_SECRET`, and `BASE_URL=http://localhost:8000` (or your public URL). For production, set `BASE_URL` to your public HTTPS URL (e.g. `https://yourapp.com`) and set `SECRET_KEY` to a random string so session cookies use the `secure` flag.
-
-**CSV limits (optional):** Maximum upload size defaults to 10 MB (`CSV_MAX_UPLOAD_BYTES`). Maximum number of valid rows per CSV defaults to 1000 (`CSV_MAX_ROWS`). Set these in `.env` if you need different limits.
-
-### Run the web app locally (PowerShell)
-
-From your project folder, run:
-
-```powershell
-cd "c:\Users\reggin\Random Cursor Shit\Jobber Integrator"
-.\run_webapp.ps1
-```
-
-Or without the script (same port):
-
-```powershell
-cd "c:\Users\reggin\Random Cursor Shit\Jobber Integrator"
-.\.venv\Scripts\uvicorn app.main:app --reload --port 8000
-```
-
-Then open [http://localhost:8000](http://localhost:8000) → **Connect to Jobber** → authorize → dashboard shows connected. Health: [http://localhost:8000/health](http://localhost:8000/health).
-
-**Test sync (verify cost + selling price mutation):** After connecting, run `python run_sync_check.py` (uses `wholesaler_prices.csv` with 25% markup), or open [http://localhost:8000/test-sync](http://localhost:8000/test-sync) and click **Run test sync**.
-
-## Tests
-
-Run the test suite before merging to `master` or deploying:
+## Tests & CI
 
 ```bash
 pytest
 ```
 
-With the project venv: `.venv\Scripts\pytest` (Windows) or `.venv/bin/pytest` (Unix).
+GitHub Actions (`.github/workflows/tests.yml`) runs the test matrix and **`pip-audit`** on pinned dependencies.
 
-**Timeouts (Phase 3.2):** Outbound HTTP calls use explicit timeouts: OAuth token exchange and account info 15s (`app/jobber_oauth.py`), Jobber GraphQL 30s (`app/sync.py`). Sync retries once on 401 after token refresh.
+---
 
-**Rate limiting (Phase 5.1):** POST `/api/sync`, `/api/sync/preview`, `/api/sync/test-run`, and `/webhooks/jobber` are limited per account (when authenticated) or per IP. Default 60 requests per minute. Set `RATE_LIMIT` in `.env` to change (e.g. `30/minute`). Exceeding the limit returns 429 with a JSON error.
+## Documentation
 
-**Webhook idempotency (Phase 5.2):** Duplicate webhook payloads (same topic, account, and body) within 5 minutes are ignored and return 200 without reprocessing, so duplicate deliveries do not cause duplicate side effects.
+- **[docs/README.md](docs/README.md)** — doc index  
+- **[docs/DEPLOYMENT_AND_MARKETPLACE_PLAN.md](docs/DEPLOYMENT_AND_MARKETPLACE_PLAN.md)** — optional path to production hosting & Jobber App Marketplace  
+- **[docs/JOBBER_SCHEMA_NOTES.md](docs/JOBBER_SCHEMA_NOTES.md)** — GraphQL notes  
 
-See [MARKETPLACE_ROADMAP.md](MARKETPLACE_ROADMAP.md) for the full path to the marketplace.
+---
+
+## License
+
+[MIT](LICENSE)
