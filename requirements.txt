@@ -1,6 +1,7 @@
 # Pinned for reproducible installs (Phase 4.1). Update periodically; run pytest and pip-audit after bumps.
-requests==2.32.5
+requests==2.33.1
 python-dotenv==1.2.1
+pygments==2.20.0
 
 # Web app (Step 1+)
 fastapi==0.133.1
