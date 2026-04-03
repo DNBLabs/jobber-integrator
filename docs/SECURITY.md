@@ -3,6 +3,7 @@
 ## Local secrets
 
 - Use **`.env`** for real values (create from **`.env.example`**). It must **never** be committed.
+- CI fails if **`.env`** appears in the git index (see `.github/workflows/tests.yml`).
 - If you are unsure whether `.env` was tracked:  
   `git ls-files --error-unmatch .env` → error means good (not tracked).  
   `git log --all --oneline -- .env` → should be empty.

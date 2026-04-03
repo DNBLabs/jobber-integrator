@@ -12,6 +12,12 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+      - name: Ensure .env is not tracked (secrets)
+        run: |
+          if [ -n "$(git ls-files -- .env)" ]; then
+            echo "::error::The file .env must never be committed. Use .env.example only. See docs/SECURITY.md"
+            exit 1
+          fi
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
