@@ -4,6 +4,7 @@
 
 - Use **`.env`** for real values (create from **`.env.example`**). It must **never** be committed.
 - CI fails if **`.env`** appears in the git index (see `.github/workflows/tests.yml`).
+- **`.cursorignore`** lists `.env` / `.env.*` so Cursor is less likely to index them for review or AI context (this repo includes that file).
 - If you are unsure whether `.env` was tracked:  
   `git ls-files --error-unmatch .env` → error means good (not tracked).  
   `git log --all --oneline -- .env` → should be empty.
